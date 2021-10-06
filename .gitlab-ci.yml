@@ -1,0 +1,152 @@
+image: docker
+
+variables:
+  # When using dind service we need to instruct docker, to talk with the
+  # daemon started inside of the service. The daemon is available with
+  # a network connection instead of the default /var/run/docker.sock socket.
+  #
+  # The 'docker' hostname is the alias of the service container as described at
+  # https://docs.gitlab.com/ee/ci/docker/using_docker_images.html#accessing-the-services
+  #
+  # Note that if you're using the Kubernetes executor, the variable should be set to
+  # tcp://localhost:2375/ because of how the Kubernetes executor connects services
+  # to the job container
+  # DOCKER_HOST: tcp://localhost:2375/
+  #
+  # For non-Kubernetes executors, we use tcp://docker:2375/
+  #DOCKER_HOST: tcp://docker:2375/
+  # When using dind, it's wise to use the overlayfs driver for
+  # improved performance.
+  #GIT_STRATEGY: none
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_DRIVER: overlay2
+
+  LABEL_NAME: $CI_PROJECT_NAME
+  LABEL_DESCRIPTION: $CI_PROJECT_NAME
+  LABEL_URL: 'https://mtt.ru'
+  LABEL_URL_SOURCE: 'http://git.rnd.mtt'
+  LABEL_URL_DOCUMENTATION: 'http://git.rnd.mtt'
+  LABEL_VENDOR: 'ОАО МТТ'
+  LABEL_MAINTAINER: '[riftbit] ErgoZ <https://riftbit.com/>'
+
+  CONTAINER_PIPE_IMAGE: $CI_REGISTRY_IMAGE/pipes
+  CONTAINER_PRODUCTION_IMAGE: $CI_REGISTRY_IMAGE
+
+  GO111MODULE: "on"
+  GOCACHE: "/go/go-build"
+  GOINSECURE: "*.rnd.mtt*,gitlab.com/*,github.com/rb-pkg/*,github.com/rb-app/*,github.com/riftbit/*,github.com/ergoz/*"
+  GOPRIVATE: $GOPRIVATE
+
+  HTTP_PROXY: "http://proxy.porta.local:3128"
+  HTTPS_PROXY: "http://proxy.porta.local:3128"
+  NO_PROXY: "docker,localhost,127.0.0.1,172.0.0.0/8,*.mtt,*.local"
+
+#  CI_DEBUG_SERVICES: trace
+#  CI_DEBUG_TRACE: "true"
+
+stages:
+  - build
+  - package
+  - deploy
+
+# TODO ADD CODE STYLE CHECKS!!!
+# TODO ADD UNIT TESTS!!!
+
+
+.with-dind-service:
+  services:
+    - name: docker:dind
+      command: ["--experimental"]
+  before_script:
+    - docker info
+    - echo "${CI_JOB_TOKEN}" | docker login -u ${CI_REGISTRY_USER} --password-stdin "${CI_REGISTRY}"
+
+
+
+rds:build:
+  stage: build
+  image: golang:1-alpine
+  before_script:
+    - apk add --no-cache git build-base
+    - echo "machine ${CI_SERVER_HOST} login ${CI_REGISTRY_USER} password ${CI_JOB_TOKEN}" > ~/.netrc
+    - git config --global url."http://${CI_REGISTRY_USER}:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/".insteadOf "http://${CI_SERVER_HOST}/"
+    - go get -d
+  script:
+    - export BUILD_DATE=$(date +"%FT%T%z")
+    - export SERVER_VERSION="API/${CI_COMMIT_SHA}/${GOLANG_VERSION}-${CI_PIPELINE_ID}/(${BUILD_DATE})"
+    - |
+      CGO_ENABLED=1 go build \
+        -trimpath \
+        -gcflags='-l=4' \
+        -ldflags "-w -s \
+          -X github.com/deniskelin/billing-gokit/internal/version.version=${SERVER_VERSION} \
+          -X github.com/deniskelin/billing-gokit/internal/version.build=${CI_PIPELINE_ID} \
+          -X github.com/deniskelin/billing-gokit/internal/version.buildDate=${BUILD_DATE} \
+          -X github.com/deniskelin/billing-gokit/internal/version.commitHash=${CI_COMMIT_SHORT_SHA}" \
+        -a -o ./builded_app
+  after_script:
+    - ls -la ./
+  artifacts:
+    untracked: true
+    paths:
+      - ./builded_app
+      - ./Dockerfile
+
+
+rds:package:
+  image: docker
+  stage: package
+  extends:
+    - .with-dind-service
+  dependencies:
+    - rds:build
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - export BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+    - echo "Building Container"
+    - |
+      docker build \
+        --build-arg NPROC="${NPROC}" \
+        --build-arg BUILD_DATE="${BUILD_DATE}" \
+        --build-arg LABEL_NAME="${LABEL_NAME}" \
+        --build-arg LABEL_DESCRIPTION="${LABEL_DESCRIPTION}" \
+        --build-arg LABEL_VENDOR="${LABEL_VENDOR}" \
+        --build-arg LABEL_URL="${LABEL_URL}" \
+        --build-arg LABEL_URL_SOURCE="${LABEL_URL_SOURCE}" \
+        --build-arg LABEL_URL_DOCUMENTATION="${LABEL_URL_DOCUMENTATION}" \
+        --build-arg LABEL_MAINTAINER="${LABEL_MAINTAINER}" \
+        --build-arg CI_COMMIT_SHA="${CI_COMMIT_SHA}" \
+        --build-arg CI_COMMIT_REF_NAME="${CI_COMMIT_REF_NAME}" \
+        --build-arg CI_COMMIT_MESSAGE="${CI_COMMIT_MESSAGE}" \
+        --build-arg CI_COMMIT_AUTHOR="${CI_COMMIT_AUTHOR}" \
+      -t $CONTAINER_PRODUCTION_IMAGE:$CI_COMMIT_REF_NAME \
+      -t $CONTAINER_PRODUCTION_IMAGE:latest \
+      -f Dockerfile .
+    - |
+      if [ $CI_COMMIT_TAG != "" ]; then
+        docker tag $CONTAINER_PRODUCTION_IMAGE:$CI_COMMIT_REF_NAME $CONTAINER_PRODUCTION_IMAGE:$CI_COMMIT_TAG
+      fi
+    - docker image ls -a 
+    - docker save "$CONTAINER_PRODUCTION_IMAGE" | gzip > ./rds-container.tar.gz
+  artifacts:
+    paths:
+      - rds-container.tar.gz
+    expire_in: 1 day
+
+
+rds:deploy:
+  image: docker
+  stage: deploy
+  extends:
+    - .with-dind-service
+  variables:
+    GIT_STRATEGY: none
+  dependencies:
+    - rds:package
+  script:
+    - docker version
+    - echo "Pushing Container"
+    - docker load --input rds-container.tar.gz
+    - docker image ls -a 
+    - docker image push --all-tags "$CONTAINER_PRODUCTION_IMAGE"

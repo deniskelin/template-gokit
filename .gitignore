@@ -1,0 +1,10 @@
+.idea
+.vscode
+builded_app
+
+pprof
+*.tmp
+
+.env
+.env.*
+!.env.sample
