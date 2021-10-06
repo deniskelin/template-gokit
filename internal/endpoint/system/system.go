@@ -5,7 +5,6 @@ import (
 	"github.com/deniskelin/billing-gokit/internal/service/system"
 
 	pb "github.com/deniskelin/billing-gokit/proto/apistatus"
-	"github.com/deniskelin/billing-gokit/proto/rds"
 	"github.com/go-kit/kit/endpoint"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
