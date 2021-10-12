@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -69,44 +68,21 @@ func main() {
 
 	initRuntime(appConfig.Runtime.UseCPUs, appConfig.Runtime.MaxThreads, coreLogger)
 
-	netListener, err := net.Listen(appConfig.Listen.Network, appConfig.Listen.Address)
-	if err != nil {
-		netLogger.Fatal().Err(err).Msg("failed to init net.Listen")
-	}
-	defer func() {
-		err = netListener.Close()
-		if err != nil {
-			// do we really need it? i think no because we already closed it by cmux.Close()
-			// netLogger.Warn().Err(err).Msgf("failed to close net.Listen %+w - %+v", err, err)
-		}
-	}()
-
 	listenErr := make(chan error, 1)
 
-	mux, grpcListener, httpListener := initCMux(netListener, netLogger, listenErr)
-	defer mux.Close()
-
-	cacheConn, err := initCache(appConfig.Cache.Type, appConfig.Cache.ConnectionString)
-	if err != nil {
-		coreLogger.Fatal().Err(err).Msg("failed to initialize a cache")
-	}
-
-	rwdb, err := initDBConnection(&appConfig.RWDB)
-	if err != nil {
-		coreLogger.Fatal().Err(err).Msg("failed to establish a connection with the database")
-	}
-	rdb, err := initDBConnection(&appConfig.RDB)
-	if err != nil {
-		coreLogger.Fatal().Err(err).Msg("failed to establish a connection with the database")
-	}
-
-	rdsEP := initRDSServiceEndpoint(rwdb, rdb, cacheConn, appConfig, apiLogger)
+	billingEP := initBillingGWServiceEndpoint(appConfig, apiLogger)
 	systemEP := initSystemServiceEndpoint(appConfig, apiLogger)
-	chiRouter := initHTTPRouter(appConfig)
+	chiRouter := initHTTPRouter(appConfig, apiLogger)
 	initMetrics(appConfig, chiRouter)
 	initHealthChecker(appConfig, chiRouter)
-	grpcServer := initKitGRPC(appConfig, grpcListener, rdsEP, systemEP, netLogger, listenErr)
-	httpServer := initKitHTTP(appConfig, httpListener, rdsEP, systemEP, netLogger, listenErr, chiRouter)
+	grpcServer, grpcListener := initKitGRPC(appConfig, billingEP, systemEP, netLogger, listenErr)
+	defer func() {
+		_ = grpcListener.Close()
+	}()
+	httpServer, httpListener := initKitHTTP(appConfig, billingEP, systemEP, netLogger, listenErr, chiRouter)
+	defer func() {
+		_ = httpListener.Close()
+	}()
 	runApp(grpcServer, httpServer, coreLogger, listenErr)
 
 }

@@ -8,31 +8,26 @@ import (
 	"time"
 
 	"github.com/deniskelin/billing-gokit/internal/config"
-	epRDS "github.com/deniskelin/billing-gokit/internal/endpoint/rds"
+	epBilling "github.com/deniskelin/billing-gokit/internal/endpoint/billing"
 	epSystem "github.com/deniskelin/billing-gokit/internal/endpoint/system"
 	"github.com/deniskelin/billing-gokit/internal/healthchecker"
-	svcRDS "github.com/deniskelin/billing-gokit/internal/service/rds"
+	svcBilling "github.com/deniskelin/billing-gokit/internal/service/billing"
 	svcSystem "github.com/deniskelin/billing-gokit/internal/service/system"
 	tpGRPC "github.com/deniskelin/billing-gokit/internal/transport/grpc"
-	tpGRPCRDS "github.com/deniskelin/billing-gokit/internal/transport/grpc/rds"
+	tpGRPCBilling "github.com/deniskelin/billing-gokit/internal/transport/grpc/billing"
 	tpGRPCSys "github.com/deniskelin/billing-gokit/internal/transport/grpc/system"
 	tpHTTP "github.com/deniskelin/billing-gokit/internal/transport/http"
-	tpHTTPRDS "github.com/deniskelin/billing-gokit/internal/transport/http/rds"
+	tpHTTPBilling "github.com/deniskelin/billing-gokit/internal/transport/http/billing"
 	tpHTTPSys "github.com/deniskelin/billing-gokit/internal/transport/http/system"
-	"github.com/deniskelin/billing-gokit/pkg/cache"
-	"github.com/deniskelin/billing-gokit/pkg/cache/connector"
-	"github.com/deniskelin/billing-gokit/pkg/rds"
-	pbapisys "github.com/deniskelin/billing-gokit/proto/apistatus"
-	pbrds "github.com/deniskelin/billing-gokit/proto/rds"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	kitgrpc "github.com/go-kit/kit/transport/grpc"
 	kithttp "github.com/go-kit/kit/transport/http"
 	"github.com/heptiolabs/healthcheck"
-	"github.com/jmoiron/sqlx"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
-	"github.com/soheilhy/cmux"
+	pbapisys "gitlab.tada.team/tada-back/billing/proto/apistatus/pb"
+	pbBillingGW "gitlab.tada.team/tada-back/billing/proto/billing-gw/pb"
 	googlegrpc "google.golang.org/grpc"
 
 	_ "github.com/jackc/pgx/stdlib"
@@ -56,27 +51,9 @@ func initRuntime(cpu, threads int, logger zerolog.Logger) {
 	logger.Info().Msgf("set to use maximum %d threads", threads)
 }
 
-func initCache(ctype, connectionString string) (cache.ICache, error) {
-	return connector.NewCache(ctype, connectionString)
-}
-
-func initDBConnection(dbConfig *config.DBConfig) (rds.DB, error) {
-	dbConnection, err := sqlx.Connect(dbConfig.DriverName, dbConfig.ConnectionString)
-	if err != nil {
-		return nil, err
-	}
-	defer dbConnection.Close()
-
-	dbConnection.SetMaxIdleConns(dbConfig.MaxIdleConnection)
-	dbConnection.SetMaxOpenConns(dbConfig.MaxOpenConnection)
-	dbConnection.SetConnMaxIdleTime(dbConfig.MaxIdleConnectionTimeout)
-
-	return dbConnection, nil
-}
-
-func initRDSServiceEndpoint(rwdb, rdb rds.DB, iCache cache.ICache, appConfig *config.Configuration, apiLogger zerolog.Logger) epRDS.Endpoints {
-	svcl := svcRDS.NewService(apiLogger, rwdb, rdb, iCache, appConfig)
-	return epRDS.MakeEndpoints(svcl)
+func initBillingGWServiceEndpoint(appConfig *config.Configuration, apiLogger zerolog.Logger) epBilling.Endpoints {
+	srv := svcBilling.NewService(appConfig, &apiLogger)
+	return epBilling.MakeEndpoints(srv)
 }
 
 func initSystemServiceEndpoint(_ *config.Configuration, apiLogger zerolog.Logger) epSystem.Endpoints {
@@ -84,44 +61,32 @@ func initSystemServiceEndpoint(_ *config.Configuration, apiLogger zerolog.Logger
 	return epSystem.MakeEndpoints(svcs)
 }
 
-func initCMux(l net.Listener, log zerolog.Logger, listenErr chan error) (cmux.CMux, net.Listener, net.Listener) {
-	m := cmux.New(l)
-	var grpcListener, httpListener net.Listener
-	grpcListener = m.Match(cmux.HTTP2())
-	//grpcListener = m.Match(cmux.HTTP2HeaderField("content-type", "application/grpc"))
-	httpListener = m.Match(cmux.HTTP1Fast())
-
-	go func(m cmux.CMux, log zerolog.Logger, listenErr chan error) {
-		//httpListener := m.Match(cmux.HTTP1Fast())
-		log.Info().Msgf("cMux listener started")
-		if err := m.Serve(); err != nil {
-			listenErr <- err
-		}
-	}(m, log, listenErr)
-	return m, grpcListener, httpListener
-}
-
-func initKitGRPC(_ *config.Configuration, l net.Listener, rdsEP epRDS.Endpoints, systemEP epSystem.Endpoints, netLogger zerolog.Logger, listenErr chan error) *googlegrpc.Server {
-	//ocTracing := kitoc.HTTPServerTrace()
-	//serverOptions := []kithttp.ServerOption{ocTracing}
+func initKitGRPC(appConfig *config.Configuration, billingEP epBilling.Endpoints, systemEP epSystem.Endpoints, netLogger zerolog.Logger, listenErr chan error) (*googlegrpc.Server, net.Listener) {
 	var serverOptions []kitgrpc.ServerOption
-	grpcRDSServer := tpGRPCRDS.NewServer(rdsEP, serverOptions)
+	grpcBillingServer := tpGRPCBilling.NewServer(billingEP, serverOptions)
 	grpcSysServer := tpGRPCSys.NewServer(systemEP)
 	grpcServer := googlegrpc.NewServer()
-	pbrds.RegisterRDSServer(grpcServer, grpcRDSServer)
+	pbBillingGW.RegisterBillingAPIServer(grpcServer, grpcBillingServer)
 	pbapisys.RegisterSystemServer(grpcServer, grpcSysServer)
-	go tpGRPC.RunGRPCServer(grpcServer, l, netLogger, listenErr)
+
+	listenerGrpc, err := net.Listen(appConfig.GRPC.Network, appConfig.GRPC.Address)
+	if err != nil {
+		netLogger.Fatal().Err(err).Msg("failed to init net.Listen for grpc")
+	} else {
+		netLogger.Info().Msg("successful net.Listen for grpc init")
+	}
+
+	go tpGRPC.RunGRPCServer(grpcServer, listenerGrpc, netLogger, listenErr)
 	time.Sleep(10 * time.Millisecond)
-	return grpcServer
+	return grpcServer, listenerGrpc
 }
 
-func initHTTPRouter(_ *config.Configuration) *chi.Mux {
+func initHTTPRouter(_ *config.Configuration, apiLogger zerolog.Logger) *chi.Mux {
 	router := chi.NewRouter()
 
-	// todo - replace with transport layer!
 	router.Use(middleware.NoCache)
 	router.Use(middleware.RealIP)
-	router.Use(middleware.RequestID) // todo change for custom
+	router.Use(middleware.RequestID)
 	router.Use(middleware.Recoverer)
 	router.Use(middleware.StripSlashes)
 
@@ -130,7 +95,9 @@ func initHTTPRouter(_ *config.Configuration) *chi.Mux {
 	router.Get("/ping", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
-		w.Write(pongResponse)
+		if _, err := w.Write(pongResponse); err != nil {
+			apiLogger.Fatal().Err(err).Msg("error of writing response")
+		}
 		return
 	})
 
@@ -141,7 +108,8 @@ func initHealthChecker(config *config.Configuration, router *chi.Mux) {
 	healthChecker := healthchecker.NewHealthChecker()
 	//healthChecker.GetHealthChecker().AddReadinessCheck("Net Listener Started", healthcheck.TCPDialCheck(config.NetListen.Address, 50*time.Millisecond))
 	// Our app is not ready if we can't resolve our upstream dependency in DNS.
-	healthChecker.GetHealthChecker().AddLivenessCheck("Net Listener Started", healthcheck.TCPDialCheck(config.Listen.Address, 50*time.Millisecond))
+	healthChecker.GetHealthChecker().AddLivenessCheck("HTTP Net Listener Started", healthcheck.TCPDialCheck(config.HTTP.Address, 50*time.Millisecond))
+	healthChecker.GetHealthChecker().AddLivenessCheck("GRPC Net Listener Started", healthcheck.TCPDialCheck(config.GRPC.Address, 50*time.Millisecond))
 	// Our app is not happy if we've got more than 100 goroutines running.
 	healthChecker.GetHealthChecker().AddLivenessCheck("Goroutine Threshold", healthcheck.GoroutineCountCheck(25))
 
@@ -152,17 +120,16 @@ func initMetrics(config *config.Configuration, router *chi.Mux) {
 	router.Get(config.Metrics.Path, promhttp.Handler().ServeHTTP)
 }
 
-func initKitHTTP(appConfig *config.Configuration, l net.Listener, rdsEP epRDS.Endpoints, systemEP epSystem.Endpoints, netLogger zerolog.Logger, listenErr chan error, router *chi.Mux) *http.Server {
-	//ocTracing := kitoc.HTTPServerTrace()
-	//serverOptions := []kithttp.ServerOption{ocTracing}
+func initKitHTTP(appConfig *config.Configuration, billingEP epBilling.Endpoints, systemEP epSystem.Endpoints, netLogger zerolog.Logger, listenErr chan error, router *chi.Mux) (*http.Server, net.Listener) {
+
 	var serverOptions []kithttp.ServerOption
 
 	router.Mount("/system", tpHTTPSys.NewServer(systemEP, serverOptions))
-	router.Mount("/v1", tpHTTPRDS.NewServer(rdsEP, serverOptions))
+	router.Mount("/v1", tpHTTPBilling.NewServer(billingEP, serverOptions))
 	if webDebugEnabled {
 		router.Mount("/dbg", ProfilerHandler())
 	}
-	//router.Post("/sendEvent", sendEventHandler.ServeHTTP)
+
 	httpServer := &http.Server{
 		Handler:      router,
 		TLSConfig:    nil,
@@ -170,7 +137,15 @@ func initKitHTTP(appConfig *config.Configuration, l net.Listener, rdsEP epRDS.En
 		WriteTimeout: appConfig.HTTP.WriteTimeout,
 		IdleTimeout:  appConfig.HTTP.IdleTimeout,
 	}
-	go tpHTTP.RunHTTPServer(httpServer, l, netLogger, listenErr)
+
+	listenerHttp, err := net.Listen(appConfig.HTTP.Network, appConfig.HTTP.Address)
+	if err != nil {
+		netLogger.Fatal().Err(err).Msg("failed to init net.Listen for http")
+	} else {
+		netLogger.Info().Msg("successful net.Listen for http init")
+	}
+
+	go tpHTTP.RunHTTPServer(httpServer, listenerHttp, netLogger, listenErr)
 	time.Sleep(10 * time.Millisecond)
-	return httpServer
+	return httpServer, listenerHttp
 }

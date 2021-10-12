@@ -4,8 +4,8 @@ import (
 	"context"
 
 	"github.com/deniskelin/billing-gokit/internal/endpoint/system"
-	pb "github.com/deniskelin/billing-gokit/proto/apistatus"
 	gt "github.com/go-kit/kit/transport/grpc"
+	"gitlab.tada.team/tada-back/billing/proto/apistatus/pb"
 )
 
 type Server struct {

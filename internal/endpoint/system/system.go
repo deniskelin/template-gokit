@@ -4,8 +4,8 @@ import (
 	"context"
 	"github.com/deniskelin/billing-gokit/internal/service/system"
 
-	pb "github.com/deniskelin/billing-gokit/proto/apistatus"
 	"github.com/go-kit/kit/endpoint"
+	"gitlab.tada.team/tada-back/billing/proto/apistatus/pb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 

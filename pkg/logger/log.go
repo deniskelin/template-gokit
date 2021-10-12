@@ -78,3 +78,7 @@ func NewDiodeLogger(w io.Writer, logLevel string, batchSize int, batcbPollInterv
 func NewComponentLogger(logger zerolog.Logger, component string, skipFrameCount int) zerolog.Logger {
 	return logger.With().Str(componentField, component).CallerWithSkipFrameCount(skipFrameCount).Logger()
 }
+
+func NewFieldLogger(logger zerolog.Logger, key string, value interface{}) zerolog.Logger {
+	return logger.With().Interface(key, value).Logger()
+}

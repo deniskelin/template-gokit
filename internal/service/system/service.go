@@ -12,7 +12,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// IService provides RDS service.
+// IService provides system service.
 type IService interface {
 	APIVersion(ctx context.Context) (*SystemAPIVersionResponse, error)
 	Info(ctx context.Context) (*SystemInfoResponse, error)

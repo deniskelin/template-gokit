@@ -24,7 +24,7 @@
 FROM alpine
 
 #COPY --from=packer /builded_app /usr/local/bin/ipcr-echo
-COPY builded_app /usr/local/bin/rds
+COPY builded_app /usr/local/bin/api-gw
 
 RUN set -exu && \
     env && \
@@ -33,7 +33,7 @@ RUN set -exu && \
 
 ENV HTTP_LISTEN_ADDRESS=":8080"
 
-CMD rds
+CMD api-gw
 
 ARG BUILD_DATE
 ARG LABEL_NAME
@@ -48,8 +48,6 @@ ARG CI_COMMIT_SHA
 ARG CI_COMMIT_REF_NAME
 ARG CI_COMMIT_MESSAGE
 ARG CI_COMMIT_AUTHOR
-
-MAINTAINER [riftbit] ErgoZ <https://riftbit.com/>
 
 LABEL \
     org.opencontainers.image.version="${VERSION}" \
